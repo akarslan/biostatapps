@@ -217,7 +217,7 @@ server=function(input, output, session){
       
     }else{
       
-      equ.sum=-7.116+(0.878*ifelse(input$pkasv=="yes",1,0))+(0.427*ifelse(input$koah=="yes",1,0))+(0.044*input$age)-(0.004*input$plt)+(0.091*input$bki)
+      equ.sum=-3.953+(0.859*ifelse(input$pkasv=="yes",1,0))+(0.808*ifelse(input$koah=="yes",1,0))+(0.052*input$age)-(0.006*input$plt)+(0.086*input$bki)
       risk=1/(1+exp(-equ.sum))
       risk_perc$val=round(risk*100,2)
       
