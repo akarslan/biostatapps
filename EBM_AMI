@@ -1,0 +1,164 @@
+from interpret import show_link
+from interpret.glassbox import ExplainableBoostingClassifier
+from interpret.perf import ROC
+import pandas as pd
+import numpy as np
+from sklearn import metrics
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.calibration import CalibratedClassifierCV, CalibrationDisplay
+import matplotlib as mpl
+mpl.rcParams["font.family"] = "Arial"
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from outliertree import OutlierTree
+import miceforest as mf
+from sklearn.ensemble import RandomForestClassifier
+from boruta import BorutaPy
+
+
+
+df = pd.read_excel(r"path to your dataset")
+X=df.iloc[:,1:103]
+y=df.iloc[:,0]
+
+y_new=[]
+for i in y:
+    if i=="Control":
+        a=0
+    else:
+        a=1
+    y_new.append(a)
+    
+    
+
+for i in range(102):
+    X.iloc[:,i]=X.iloc[:,i]/np.median(X.iloc[:,i])
+
+outliermodel=OutlierTree()
+outliermodel.fit(X, outliers_print = 10, return_outliers = True)
+outs=outliermodel.predict(X)
+outliermodel.print_outliers(outs)
+outs=outs.dropna()
+
+for i in range(outs.shape[0]):
+    X[outs.iloc[i,0]["column"]].iloc[outs.index[0]]=np.nan
+
+
+
+kds = mf.ImputationKernel(
+    X,
+    save_all_iterations=True,
+    random_state=2
+) 
+
+X_completed=kds.complete_data()
+
+for i in range(X_completed.shape[1]):
+    print(any(np.isnan(X_completed.iloc[:,i])))
+    
+rf = RandomForestClassifier(n_jobs=-1, class_weight='balanced', max_depth=5)
+fs_boruta = BorutaPy(rf, n_estimators='auto', verbose=2, random_state=1)
+fs_boruta.fit(X_completed.values, y.values)
+a=[i for i,s in enumerate(fs_boruta.support_) if s==True]
+X_selected_boruta=X_completed.iloc[:,a]
+
+
+X_selected=X_selected_boruta
+
+X_train, X_test, y_train, y_test = train_test_split(X_selected, y_new, test_size=0.25, random_state=42)
+
+ebm_params={
+    
+    "outer_bags":list(range(1,11,1)),
+    "learning_rate": [0.001,0.005,0.01],
+    "early_stopping_rounds":list(range(35,41,1)),
+    "max_rounds":list(range(9000,10000,100)),
+    "max_leaves":list(range(5,11,1))    
+    
+    }
+
+
+ebm = ExplainableBoostingClassifier(
+    interactions=10,
+    early_stopping_rounds=37,
+    learning_rate=0.01,
+    max_leaves=10,
+    max_rounds=10000,
+    outer_bags=10,
+    max_interaction_bins=4,
+    validation_size=0.15,
+    min_samples_leaf=1)
+
+#rand = GridSearchCV(ebm, ebm_params, cv=5, scoring='accuracy', return_train_score=False,verbose=10)
+#rand.fit(X_train, y_train)
+
+
+ebm.fit(X_train, y_train)
+y_pred = ebm.predict(X_test)
+cm_ebm=metrics.confusion_matrix(y_test,y_pred)
+
+ebm_local = ebm.explain_local(X_test, y_test, name='EBM')
+show_link([ebm_local])
+ebm.term_importances()
+
+ebm_global = ebm.explain_global(name='EBM')
+show_link([ebm_global])
+
+ebm_perf = ROC(ebm).explain_perf(X_test, y_test, name='EBM')
+show_link(ebm_perf)
+
+plotly_fig = ebm_local.visualize(1)
+
+cm_disp=metrics.ConfusionMatrixDisplay(cm_ebm,display_labels=["Control","AMI"])
+cm_disp.plot()
+
+roc_plot=metrics.RocCurveDisplay.from_estimator(ebm, X_test, y_test,pos_label=1)
+
+
+def metric_calc(y_test,y_pred,metric):
+    cm=metrics.confusion_matrix(y_test,y_pred)
+    if metric=="acc":
+        return (cm[0,0]+cm[1,1])/sum(sum(cm))
+    elif metric=="sens":
+        return (cm[1,1])/(cm[0,1]+cm[1,1])
+    elif metric=="spec":
+        return (cm[0,0])/(cm[0,0]+cm[1,0])
+    
+    
+    
+auc=roc_auc_score(y_test, ebm.decision_function(X_test))
+acc=metric_calc(y_test, y_pred,metric="acc")
+sens=metric_calc(y_test, y_pred,metric="sens")
+spec=metric_calc(y_test, y_pred,metric="spec")
+f1=f1_score(y_test, y_pred,pos_label=1)
+
+###Bootstrapped metrics
+
+def bootstrapped_metrics(y_test, y_pred, n_iterations=1000, ci=95, metric="auc"):
+    
+    import numpy as np
+    from sklearn.utils import resample
+    bootstrapped_scores = []
+    y_test=np.array(y_test)
+        
+    for i in range(n_iterations):
+        indices = resample(np.arange(len(y_pred)), replace=True)
+        if metric=="auc":
+            bootstrapped_score = metrics.roc_auc_score(y_test[indices], ebm.decision_function(X_test)[indices])
+        elif metric=="sens":
+            bootstrapped_score = metric_calc(y_test[indices], y_pred[indices],metric="sens")
+        elif metric=="spec":
+            bootstrapped_score = metric_calc(y_test[indices], y_pred[indices],metric="spec")
+        elif metric=="acc":
+            bootstrapped_score = metric_calc(y_test[indices], y_pred[indices],metric="acc")
+        elif metric=="f1":
+            bootstrapped_score = metrics.f1_score(y_test[indices], y_pred[indices],pos_label=1)
+        bootstrapped_scores.append(bootstrapped_score)
+        
+    # Calculate the confidence interval bounds
+    lower = np.percentile(bootstrapped_scores, (100-ci)/2)
+    upper = np.percentile(bootstrapped_scores, 100-(100-ci)/2)
+    
+    return lower, upper#, bootstrapped_scores
